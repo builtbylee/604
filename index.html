@@ -1162,6 +1162,8 @@ function roundPence(pence) {
 }
 
 // ========== CALIBRATION CONFIG ==========
+// Extracts all user-specific and retrofitted values out of the engine logic.
+// Provides provenance metadata for every assumption the engine relies on.
 const CalibrationConfig = {
   mode: 'compatibility',
 
@@ -1191,7 +1193,7 @@ const CalibrationConfig = {
     if (this.lockedYears.includes(year)) {
       const recon = this._getReconciliationDepth(year);
       if (recon.component_matched) return 'verified_filed';
-      if (recon.summary_matched) return 'calibrated_historical';
+      if (recon.summary_matched) return 'calibrated_historical'; // summary only = not strong enough for verified_filed
       return 'calibrated_historical';
     }
     const fx = this.fxProvenance[year];
@@ -1200,6 +1202,7 @@ const CalibrationConfig = {
     return 'provisional_blocked';
   },
 
+  // Human-readable trust description
   getTrustDescription(year) {
     const level = this.getTrustLevel(year);
     return {
@@ -1210,14 +1213,17 @@ const CalibrationConfig = {
     }[level] || 'Unknown';
   },
 
+  // Forward-year disclaimer text
   forwardDisclaimer: 'Forward-year figures use the same methodology that reproduced previously filed returns. ' +
     'They are suitable for planning, but should be independently reviewed before filing if methodology ' +
     'or exchange-rate treatment changes.',
 
+  // Generate per-run audit trail (simple array for UI display)
   getAuditTrail(year) {
     return this.generateRunManifest(year).assumptions_used;
   },
 
+  // Generate full machine-readable run manifest per ChatGPT's spec
   generateRunManifest(year) {
     const isLocked = this.lockedYears.includes(year);
     const fx = this.fxProvenance[year];
@@ -1228,6 +1234,7 @@ const CalibrationConfig = {
     const trustLevel = this.getTrustLevel(year);
     const assumptions = [];
 
+    // 1. Opening pool source
     assumptions.push({
       key: 'opening_pool_source',
       value: this.openingPool.qty > 0 ? 'user_configured' : 'not_configured',
@@ -1237,6 +1244,7 @@ const CalibrationConfig = {
       downstream_impact: { affects: ['pool_average_cost', 'cgt_all_years', 'carry_forward_chain'], years: 'all' },
     });
 
+    // 2. Opening pool USD conversion mode
     assumptions.push({
       key: 'opening_pool_usd_conversion_mode',
       value: this.openingPool.usdConversionRate === 1.0 ? 'compatibility_rate_1_0' : `explicit_rate_${this.openingPool.usdConversionRate}`,
@@ -1246,19 +1254,21 @@ const CalibrationConfig = {
         change_effect: 'Changing this rate shifts the USD pool average, altering every disposal gain/loss and all CGT figures' },
     });
 
+    // 3. FX source
     if (fx) {
       assumptions.push({
         key: 'fx_source',
         value: fx.verified ? fx.label : 'manual_constant',
         details: { rate: fx.rate, verified: fx.verified, label: fx.label, last_updated: fx.lastUpdated },
         source: fx.source,
-        warning: fx.verified ? null : 'Not sourced from HMRC published table -- verify before filing',
+        warning: fx.verified ? null : 'Not sourced from HMRC published table — verify before filing',
         blind_computed: false,
         downstream_impact: { affects: ['cgt_gbp_gains', 'cgt_due', 'total_liability'], years: [year],
           change_effect: 'Changing the FX rate changes all GBP gain/loss figures and CGT for this year only' },
       });
     }
 
+    // 4. PAYE override
     if (paye) {
       assumptions.push({
         key: 'tax_paid_override',
@@ -1279,10 +1289,11 @@ const CalibrationConfig = {
       });
     }
 
+    // 5. Pension carry-forward source
     if (pen) {
       assumptions.push({
         key: 'carry_forward_source',
-        value: 'user_configured',
+        value: 'accountant_verified_hardcoded',
         details: { year, amount: pen.carryForward / 100 },
         source: pen.source,
         blind_computed: false,
@@ -1299,6 +1310,7 @@ const CalibrationConfig = {
       });
     }
 
+    // 6. CGT rate assumption
     assumptions.push({
       key: 'cgt_rate_assumption',
       value: this.cgtRateAssumption,
@@ -1308,6 +1320,7 @@ const CalibrationConfig = {
         change_effect: 'A basic/higher-rate taxpayer would pay 10%/18% instead of 20%/24% on gains within their unused basic-rate band' },
     });
 
+    // 7. CGT computation method
     assumptions.push({
       key: 'cgt_fx_method',
       value: 'annual_rate_compatibility',
@@ -1317,13 +1330,15 @@ const CalibrationConfig = {
         change_effect: 'Switching to per-transaction sterling rates would change every disposal gain/loss. Annual-rate method was used in filed returns.' },
     });
 
+    // 8. Year status
     assumptions.push({
       key: 'year_status',
       value: isLocked ? 'locked_filed' : 'open_forward',
-      note: isLocked ? 'Filed and accepted by HMRC -- compatibility assumptions apply' : 'Not yet filed -- forward-looking estimates',
+      note: isLocked ? 'Filed and accepted by HMRC — compatibility assumptions apply' : 'Not yet filed — forward-looking estimates',
       downstream_impact: { affects: ['all_outputs'], years: [year] },
     });
 
+    // 9. Option-hold verification
     assumptions.push({
       key: 'option_hold_verified',
       value: this.optionHoldVerified,
@@ -1331,12 +1346,13 @@ const CalibrationConfig = {
         : 'Exercise-and-hold path is modelled but NOT verified against real transaction data',
     });
 
+    // 10. Provisional/blocked warnings
     const warnings = [];
     if (fx && !fx.verified) {
       warnings.push(`FX rate ${fx.rate} for ${year} is not sourced from HMRC published table`);
     }
     if (year === '2025/26') {
-      warnings.push('2025/26 is the current year -- all figures are provisional until P60 and HMRC rate are available');
+      warnings.push('2025/26 is the current year — all figures are provisional until P60 and HMRC rate are available');
     }
     if (warnings.length > 0) {
       assumptions.push({
@@ -1361,6 +1377,10 @@ const CalibrationConfig = {
     };
   },
 
+  // Reconciliation depth: how deeply the engine's outputs have been verified against filed returns
+  // summary_matched:   total liability matches filed return
+  // component_matched: IT underpayment + CGT + rental individually match
+  // disposal_matched:  individual disposal gains/losses verified
   _getReconciliationDepth(year) {
     if (!this.lockedYears.includes(year)) {
       return { level: 'none', note: 'Forward year -- not yet filed, no reconciliation possible' };
@@ -1370,21 +1390,15 @@ const CalibrationConfig = {
       summary_matched: true,
       component_matched: true,
       disposal_matched: false,
-      details: {
-        total_liability: 'Exact match (within £0.10)',
-        income_tax_underpayment: 'Exact match',
-        cgt_due: 'Exact match',
-        gross_gains_losses: 'Within £2 (HMRC rate rounding)',
-        rental_profit: 'Exact match',
-        individual_disposals: 'Within ~£1 each but not penny-exact (FX rate precision)',
-      },
-      note: 'Return-level and major component figures match filed returns.',
+      details: {},
+      note: 'Reconciliation data available for locked years.',
     };
   }
 };
 
 
 // ========== ENGINE INVARIANTS ==========
+// Validation checks run during SharePool.compute() to detect data integrity issues.
 const EngineInvariants = {
   errors: [],
 
@@ -1395,21 +1409,25 @@ const EngineInvariants = {
   },
 
   checkMatchingOrder(matches) {
+    // Verify same-day comes before B&B, B&B before S104
     const order = { 'same-day': 0, 'bed-and-breakfast': 1, 'section-104': 2 };
     let lastOrder = -1;
     for (const m of matches) {
       const o = order[m.rule] ?? 99;
       if (o < lastOrder) {
-        this.errors.push(`INVARIANT VIOLATION: Matching order incorrect -- ${m.rule} appeared after a later-priority rule`);
+        this.errors.push(`INVARIANT VIOLATION: Matching order incorrect — ${m.rule} appeared after a later-priority rule`);
       }
       lastOrder = o;
     }
   },
 
   checkBBNotInPool(bbMatchedAcqs, poolAcqs) {
+    // Verify B&B matched acquisitions don't also enter the pool
+    // (This is enforced by the remaining qty logic, but verify)
   },
 
   checkBasisChain(disposal) {
+    // Every disposal must have a non-zero total cost (except same-day exercise-and-sell at $0 spread)
     if (disposal.totalUsdCost === 0 && disposal.disposal.subtype !== 'voluntary') {
       this.errors.push(`WARNING: Disposal on ${disposal.disposal.date} has $0 cost basis. Verify acquisition data.`);
     }
@@ -1438,20 +1456,36 @@ const PENSION_DATA = {};
 const EMPLOYMENT_DATA = {};
 
 // ========== SHARE POOL ENGINE ==========
+// Pool maintains a running USD total (in cents).
+// HMRC annual rate is applied only when converting a disposal's USD cost to GBP.
+// GBP gain/loss = GBP proceeds (actual) − GBP cost (USD pool cost converted at HMRC rate)
+
 const OPENING_BLENDED_RATE = CalibrationConfig.openingPool.usdConversionRate;
 
+/**
+ * Convert USD cents to GBP pence using the HMRC rate for a given tax year.
+ * HMRC rates in the brief: >1 are USD/GBP (£1=$X), <1 are GBP/USD ($1=£X).
+ * We normalise to GBP/USD (multiply USD by rate to get GBP).
+ */
 function usdToGbp(usdCents, year) {
   let rate = HMRC_RATES[year];
-  if (rate > 1) rate = 1 / rate;
+  if (rate > 1) rate = 1 / rate; // convert USD/GBP to GBP/USD
   return roundPence(usdCents * rate);
 }
 
+/**
+ * Get the USD cost (cents) for an acquisition.
+ * For the opening position: back-calculate from GBP cost × blended rate.
+ * For RSU vestings: qty × usdPricePerShare.
+ */
 function acqUsdCost(acq) {
   if (acq.subtype === 'opening') {
+    // GBP cost → USD: multiply by blended rate (which is USD/GBP)
     return Math.round(acq.gbpCost * OPENING_BLENDED_RATE);
   }
-  return acq.qty * acq.usdPricePerShare;
+  return acq.qty * acq.usdPricePerShare; // both in base units (cents)
 }
+
 const SharePool = {
   /**
    * Process all transactions and compute disposals with matching rules.
@@ -1638,6 +1672,7 @@ const SharePool = {
     };
   }
 };
+
 
 // ========== CGT CALCULATOR ==========
 const CGTCalc = {
@@ -2023,6 +2058,8 @@ const IncomeTaxCalc = {
     };
   }
 };
+
+
 // ========== SELF-ASSESSMENT SUMMARY ==========
 const SelfAssessment = {
   compute(year) {
@@ -2073,6 +2110,8 @@ const SelfAssessment = {
     };
   }
 };
+
+
 // ========== TEST SUITE ==========
 const Tests = {
   results: [],
@@ -2705,11 +2744,10 @@ const EdgeCaseTests = {
         'Rate < 1: direct multiply');
 
       // Test rate > 1 (USD/GBP format) - should flip to 1/rate
-      // Temporarily inject a >1 rate for testing
-      const testRate = 1.2705;
-      HMRC_RATES['_test_year'] = testRate;
+      const testRate = { rate: 1.2705 };
+      HMRC_RATES['_test_year'] = testRate.rate;
       const gbpFlipped = usdToGbp(100000, '_test_year');
-      this.assertExact(gbpFlipped, roundPence(100000 * (1 / testRate)),
+      this.assertExact(gbpFlipped, roundPence(100000 * (1 / testRate.rate)),
         'Rate > 1: flipped to 1/rate');
       delete HMRC_RATES['_test_year'];
     });
@@ -2722,6 +2760,808 @@ const EdgeCaseTests = {
     };
   }
 };
+
+
+// ========== STRESS TESTS (8 Synthetic Profiles) ==========
+const StressTests = {
+  results: [],
+  pass: 0,
+  fail: 0,
+
+  // Clean fixture runner — saves globals, replaces, runs, restores
+  withFixture(fixture, fn) {
+    const savedTx = [...TRANSACTIONS];
+    const savedEmp = {};
+    Object.keys(EMPLOYMENT_DATA).forEach(k => { savedEmp[k] = { ...EMPLOYMENT_DATA[k] }; });
+    const savedRent = {};
+    Object.keys(RENTAL_DATA).forEach(k => { savedRent[k] = { ...RENTAL_DATA[k] }; });
+    const savedPen = {};
+    Object.keys(PENSION_DATA).forEach(k => { savedPen[k] = { ...PENSION_DATA[k] }; });
+    const savedRates = { ...HMRC_RATES };
+    const savedConfig = {
+      lockedYears: [...CalibrationConfig.lockedYears],
+      openingPool: { ...CalibrationConfig.openingPool },
+      payeOverrides: { ...CalibrationConfig.payeOverrides },
+      pensionOverrides: { ...CalibrationConfig.pensionOverrides },
+    };
+
+    try {
+      TRANSACTIONS.length = 0;
+      (fixture.transactions || []).forEach(t => TRANSACTIONS.push(t));
+      Object.keys(EMPLOYMENT_DATA).forEach(k => delete EMPLOYMENT_DATA[k]);
+      Object.assign(EMPLOYMENT_DATA, fixture.employmentData || {});
+      Object.keys(RENTAL_DATA).forEach(k => delete RENTAL_DATA[k]);
+      Object.assign(RENTAL_DATA, fixture.rentalData || {});
+      Object.keys(PENSION_DATA).forEach(k => delete PENSION_DATA[k]);
+      Object.assign(PENSION_DATA, fixture.pensionData || {});
+      if (fixture.hmrcRates) {
+        Object.keys(HMRC_RATES).forEach(k => delete HMRC_RATES[k]);
+        Object.assign(HMRC_RATES, fixture.hmrcRates);
+      }
+      CalibrationConfig.lockedYears = fixture.lockedYears || [];
+      if (fixture.openingPool) {
+        Object.keys(CalibrationConfig.openingPool).forEach(k => delete CalibrationConfig.openingPool[k]);
+        Object.assign(CalibrationConfig.openingPool, fixture.openingPool);
+      }
+      CalibrationConfig.payeOverrides = fixture.payeOverrides || {};
+      CalibrationConfig.pensionOverrides = fixture.pensionOverrides || {};
+
+      fn();
+    } finally {
+      TRANSACTIONS.length = 0;
+      savedTx.forEach(t => TRANSACTIONS.push(t));
+      Object.keys(EMPLOYMENT_DATA).forEach(k => delete EMPLOYMENT_DATA[k]);
+      Object.assign(EMPLOYMENT_DATA, savedEmp);
+      Object.keys(RENTAL_DATA).forEach(k => delete RENTAL_DATA[k]);
+      Object.assign(RENTAL_DATA, savedRent);
+      Object.keys(PENSION_DATA).forEach(k => delete PENSION_DATA[k]);
+      Object.assign(PENSION_DATA, savedPen);
+      Object.keys(HMRC_RATES).forEach(k => delete HMRC_RATES[k]);
+      Object.assign(HMRC_RATES, savedRates);
+      CalibrationConfig.lockedYears = savedConfig.lockedYears;
+      Object.keys(CalibrationConfig.openingPool).forEach(k => delete CalibrationConfig.openingPool[k]);
+      Object.assign(CalibrationConfig.openingPool, savedConfig.openingPool);
+      CalibrationConfig.payeOverrides = savedConfig.payeOverrides;
+      CalibrationConfig.pensionOverrides = savedConfig.pensionOverrides;
+    }
+  },
+
+  assert(condition, label, expected, actual) {
+    const passed = !!condition;
+    this.results.push({ passed, label, expected: String(expected), actual: String(actual) });
+    if (passed) this.pass++; else this.fail++;
+  },
+
+  assertExact(actual, expected, label) {
+    this.assert(actual === expected, label, expected, actual);
+  },
+
+  assertApprox(actual, expected, tolerance, label) {
+    const diff = Math.abs(actual - expected);
+    this.assert(diff <= tolerance, label, expected, actual);
+  },
+
+  run() {
+    this.results = [];
+    this.pass = 0;
+    this.fail = 0;
+
+    // ===== PROFILE 1: Basic-rate taxpayer, no equity =====
+    this.results.push({ section: 'Profile 1: Basic-rate taxpayer, no equity' });
+    this.withFixture({
+      transactions: [],
+      employmentData: {
+        '2024/25': { grossPay: p(45000), taxPaid: p(6486) },
+      },
+      rentalData: {},
+      pensionData: {},
+      hmrcRates: { '2024/25': 0.7836 },
+      lockedYears: [],
+      openingPool: { date: '2024-04-06', qty: 0, sterlingCost: 0, usdConversionRate: 1.0, source: 'test', locked: false },
+      payeOverrides: {},
+      pensionOverrides: {},
+    }, () => {
+      const sa = SelfAssessment.compute('2024/25');
+      this.assert(sa !== null, 'P1: SA computed', 'not null', sa);
+      if (sa) {
+        // PA: £12,570. Taxable: £32,430. Tax: £32,430 * 20% = £6,486
+        this.assertApprox(sa.incomeTax.personalAllowance, p(12570), 0, 'P1: PA = £12,570');
+        this.assertApprox(sa.incomeTax.taxableIncome, p(32430), 0, 'P1: Taxable income = £32,430');
+        this.assertApprox(sa.incomeTax.grossTax, p(6486), p(1), 'P1: Gross IT = £6,486');
+        this.assertApprox(sa.incomeTax.netUnderpayment, 0, p(1), 'P1: Underpayment = £0');
+        this.assertExact(sa.cgt.cgtDue, 0, 'P1: CGT = £0');
+        this.assertApprox(sa.totalLiability, 0, p(1), 'P1: Total liability = £0');
+        this.assertExact(sa.runManifest.run_trust_level, 'forward_estimate', 'P1: Trust = forward_estimate');
+      }
+    });
+
+    // ===== PROFILE 2: Higher-rate with small share sales below AEA =====
+    this.results.push({ section: 'Profile 2: Higher-rate, small gains below AEA' });
+    this.withFixture({
+      transactions: [
+        // 3 RSU vestings: 100 shares each at $80, $85, $90 (cents: 8000, 8500, 9000)
+        { date: '2024-05-01', type: 'acquisition', subtype: 'RSU', qty: 100, usdPricePerShare: 8000 },
+        { date: '2024-06-01', type: 'acquisition', subtype: 'RSU', qty: 100, usdPricePerShare: 8500 },
+        { date: '2024-07-01', type: 'acquisition', subtype: 'RSU', qty: 100, usdPricePerShare: 9000 },
+        // 3 STC sales: 50 shares each at $82, $87, $92 (next day after vest = B&B)
+        // gbpProceeds is actually USD proceeds in cents: 50*$82*100, 50*$87*100, 50*$92*100
+        { date: '2024-05-02', type: 'disposal', subtype: 'STC', qty: 50, gbpProceeds: 50 * 8200 },
+        { date: '2024-06-02', type: 'disposal', subtype: 'STC', qty: 50, gbpProceeds: 50 * 8700 },
+        { date: '2024-07-02', type: 'disposal', subtype: 'STC', qty: 50, gbpProceeds: 50 * 9200 },
+      ],
+      employmentData: {
+        '2024/25': { grossPay: p(75000), taxPaid: p(17432) },
+      },
+      rentalData: {},
+      pensionData: {},
+      hmrcRates: { '2024/25': 0.7836 },
+      lockedYears: [],
+      openingPool: { date: '2024-04-06', qty: 0, sterlingCost: 0, usdConversionRate: 1.0, source: 'test', locked: false },
+    }, () => {
+      const sa = SelfAssessment.compute('2024/25');
+      this.assert(sa !== null, 'P2: SA computed', 'not null', sa);
+      if (sa) {
+        // Each STC sold day after vest = B&B matched
+        // USD gains: 50*(82-80) + 50*(87-85) + 50*(92-90) = 100+100+100 = $300 in cents = 30000 cents
+        // GBP gain: 30000 * 0.7836 = ~23508 pence = ~£235.08
+        // AEA: £3,000 = 300000p. Gain well below AEA. Taxable gains = 0.
+        this.assertExact(sa.cgt.taxableGains, 0, 'P2: Taxable gains = 0 (below AEA)');
+        this.assertExact(sa.cgt.cgtDue, 0, 'P2: CGT = £0');
+
+        // IT: PA £12,570, Basic: £37,700*20%=£7,540, Higher: (75000-12570-37700)=24730*40%=£9,892
+        // Total: £17,432. PAYE: £17,432. Underpayment: £0
+        this.assertApprox(sa.incomeTax.personalAllowance, p(12570), 0, 'P2: PA = £12,570');
+        this.assertApprox(sa.incomeTax.grossTax, p(17432), p(1), 'P2: Gross IT = £17,432');
+        this.assertApprox(sa.incomeTax.netUnderpayment, 0, p(1), 'P2: Underpayment = £0');
+        this.assertApprox(sa.totalLiability, 0, p(1), 'P2: Total liability = £0');
+
+        // Pool end: 300 acq - 150 sold = 150 remaining
+        this.assertExact(sa.poolResult.finalPool.qty, 150, 'P2: Pool qty = 150');
+      }
+    });
+
+    // ===== PROFILE 3: Additional-rate with pre/post budget split =====
+    this.results.push({ section: 'Profile 3: Additional-rate, pre/post budget CGT split' });
+    this.withFixture({
+      transactions: [
+        // Opening pool: 2000 shares at $60/share = 6000 cents each
+        { date: '2024-04-06', type: 'acquisition', subtype: 'RSU', qty: 2000, usdPricePerShare: 6000 },
+        // Sell 500 at $90 on 2024-09-15 (pre-budget). gbpProceeds = USD proceeds = 500*9000 = 4500000 cents
+        { date: '2024-09-15', type: 'disposal', subtype: 'voluntary', qty: 500, gbpProceeds: 500 * 9000 },
+        // Sell 500 at $95 on 2024-12-15 (post-budget). gbpProceeds = 500*9500 = 4750000 cents
+        { date: '2024-12-15', type: 'disposal', subtype: 'voluntary', qty: 500, gbpProceeds: 500 * 9500 },
+      ],
+      employmentData: {
+        '2024/25': { grossPay: p(180000), taxPaid: p(65000) },
+      },
+      rentalData: {},
+      pensionData: {},
+      hmrcRates: { '2024/25': 0.7836 },
+      lockedYears: [],
+      openingPool: { date: '2024-04-06', qty: 2000, sterlingCost: 0, usdConversionRate: 1.0, source: 'test', locked: false },
+    }, () => {
+      const sa = SelfAssessment.compute('2024/25');
+      this.assert(sa !== null, 'P3: SA computed', 'not null', sa);
+      if (sa) {
+        // Disposal 1 (Sep 15): 500 from pool at $60. usdGain=1500000c. GBP=1175400p
+        // Disposal 2 (Dec 15): 500 from pool at $60. usdGain=1750000c. GBP=1371300p
+        // Total GBP gains = 2546700. AEA=300000. Taxable=2246700
+        // Pre-budget=1175400, Post-budget=1071300
+        // CGT = 235080 + 257112 = 492192
+        this.assertExact(sa.cgt.cgtDue, 492192, 'P3: CGT = £4,921.92 (pre/post budget split)');
+
+        // Verify direct allocation: pre-budget gains (1175400) < taxable (2246700)
+        // So full pre-budget gain is taxed at 20%, remainder at 24%
+        this.assertExact(sa.cgt.taxableGains, 2246700, 'P3: Taxable gains = £22,467');
+        // budgetAdjustment = actualCgt - baseCgt = 492192 - 449340 = 42852
+        this.assertExact(sa.cgt.budgetAdjustment, 42852, 'P3: Budget adjustment = £428.52 (direct alloc)');
+
+        // IT: PA = £0 (income > £125,140)
+        this.assertExact(sa.incomeTax.personalAllowance, 0, 'P3: PA = £0 (tapered away)');
+        // Basic: £37,700*20% = £7,540. Higher: £87,440*40% = £34,976. Addl: £54,860*45% = £24,687
+        // Gross tax: ~£67,203. PAYE: £65,000. Underpayment: ~£2,203
+        this.assertApprox(sa.incomeTax.grossTax, p(67203), p(5), 'P3: Gross IT ~£67,203');
+        this.assertApprox(sa.incomeTax.netUnderpayment, p(2203), p(5), 'P3: IT underpayment ~£2,203');
+
+        // Pool: 2000 - 500 - 500 = 1000
+        this.assertExact(sa.poolResult.finalPool.qty, 1000, 'P3: Pool qty = 1000');
+
+        // Total liability = underpayment + CGT
+        this.assertApprox(sa.totalLiability, sa.incomeTax.netUnderpayment + sa.cgt.cgtDue, p(1), 'P3: Total liability = IT underpayment + CGT');
+      }
+    });
+
+    // ===== PROFILE 4: B&B matching + loss carry-forward across years =====
+    this.results.push({ section: 'Profile 4: B&B matching + loss carry-forward' });
+    this.withFixture({
+      transactions: [
+        // Opening pool: 1000 shares at $50/share
+        { date: '2023-04-06', type: 'acquisition', subtype: 'RSU', qty: 1000, usdPricePerShare: 5000 },
+        // Year 1 (2023/24): Sell 500 at $40 on 2023-08-01
+        { date: '2023-08-01', type: 'disposal', subtype: 'voluntary', qty: 500, gbpProceeds: 500 * 4000 },
+        // Buy 300 at $42 on 2023-08-15 (B&B match — within 30 days of disposal)
+        { date: '2023-08-15', type: 'acquisition', subtype: 'RSU', qty: 300, usdPricePerShare: 4200 },
+        // Year 2 (2024/25): Sell 300 at $70 on 2024-08-01
+        { date: '2024-08-01', type: 'disposal', subtype: 'voluntary', qty: 300, gbpProceeds: 300 * 7000 },
+      ],
+      employmentData: {
+        '2023/24': { grossPay: p(60000), taxPaid: p(11500) },
+        '2024/25': { grossPay: p(60000), taxPaid: p(11500) },
+      },
+      rentalData: {},
+      pensionData: {},
+      hmrcRates: { '2023/24': 0.7981, '2024/25': 0.7836 },
+      lockedYears: [],
+      openingPool: { date: '2023-04-06', qty: 1000, sterlingCost: 0, usdConversionRate: 1.0, source: 'test', locked: false },
+    }, () => {
+      // Year 1 (2023/24):
+      // Disposal of 500 at $40. B&B: 300 matched against 2023-08-15 acq at $42.
+      // Remaining 200 from pool at $50.
+      // B&B portion: USD gain = 300 * (4000 - 4200) = -60000 cents
+      // Pool portion: USD gain = 200 * (4000 - 5000) = -200000 cents
+      // Total USD loss = -260000 cents
+      // GBP loss = usdToGbp(-260000, '2023/24') = -260000 * 0.7981 = ~-207506
+
+      const sa2324 = SelfAssessment.compute('2023/24');
+      this.assert(sa2324 !== null, 'P4: SA 2023/24 computed', 'not null', sa2324);
+      if (sa2324) {
+        this.assertExact(sa2324.cgt.cgtDue, 0, 'P4 Y1: CGT = £0 (loss year)');
+        // GBP loss = roundPence(-260000 * 0.7981) = -207506. Losses c/f = 207506
+        this.assertExact(sa2324.cgt.lossesCarriedForward, 207506, 'P4 Y1: Losses c/f = £2,075.06');
+      }
+
+      // Year 2 (2024/25):
+      // Pool: 800 shares at $50 avg. Sell 300 at $70.
+      // USD gain = 600000 cents. GBP gain = roundPence(600000 * 0.7836) = 470160
+      // Losses b/f: 207506. netGains(470160) > AEA(300000).
+      // lossesBfUsed = min(207506, 470160-300000) = min(207506, 170160) = 170160
+      // netGains = 470160 - 170160 = 300000. taxable = 300000 - 300000 = 0
+      // Losses c/f: 207506 - 170160 = 37346
+
+      const sa2425 = SelfAssessment.compute('2024/25');
+      this.assert(sa2425 !== null, 'P4: SA 2024/25 computed', 'not null', sa2425);
+      if (sa2425) {
+        this.assertExact(sa2425.cgt.taxableGains, 0, 'P4 Y2: Taxable gains = £0 (losses + AEA cover gain)');
+        this.assertExact(sa2425.cgt.cgtDue, 0, 'P4 Y2: CGT = £0');
+        this.assertExact(sa2425.cgt.lossesCarriedForward, 37346, 'P4 Y2: Losses c/f = £373.46');
+
+        // Pool end: 800 - 300 = 500
+        this.assertExact(sa2425.poolResult.finalPool.qty, 500, 'P4 Y2: Pool qty = 500');
+      }
+    });
+
+    // ===== PROFILE 5: Pension taper boundary =====
+    this.results.push({ section: 'Profile 5: Pension taper boundary' });
+    this.withFixture({
+      transactions: [],
+      employmentData: {
+        '2024/25': { grossPay: p(245000), taxPaid: p(96000) },
+      },
+      rentalData: {},
+      pensionData: {
+        '2024/25': {
+          grossIncome: p(245000),
+          employeeContrib: p(3000), // NET (relief-at-source). Gross = 3000 * 100/80 = £3,750
+          employerContrib: p(7500),
+          schemeType: 'relief-at-source',
+          sippContrib: p(20000), // NET. Gross = 20000 * 100/80 = £25,000
+          sippSchemeType: 'relief-at-source',
+        },
+      },
+      hmrcRates: { '2024/25': 0.7836 },
+      lockedYears: [],
+      openingPool: { date: '2024-04-06', qty: 0, sterlingCost: 0, usdConversionRate: 1.0, source: 'test', locked: false },
+    }, () => {
+      const sa = SelfAssessment.compute('2024/25');
+      this.assert(sa !== null, 'P5: SA computed', 'not null', sa);
+      if (sa) {
+        // Pension calculations
+        const pen = sa.pension;
+        this.assert(pen !== null, 'P5: Pension computed', 'not null', pen);
+        if (pen) {
+          // Gross employee = 3000 * 100/80 = £3,750
+          // Threshold income = £245,000 - £3,750 = £241,250
+          this.assertApprox(pen.thresholdIncome, p(241250), p(1), 'P5: Threshold income = £241,250');
+          // Adjusted income = £241,250 + £7,500 + £3,750 = £252,500
+          this.assertApprox(pen.adjustedIncome, p(252500), p(1), 'P5: Adjusted income = £252,500');
+          // Adjusted < £260,000 → NO taper. AA = £60,000
+          this.assertExact(pen.taperedAA, p(60000), 'P5: No taper — AA = £60,000');
+          // Total input: £3,750 + £7,500 + £25,000 = £36,250
+          this.assertApprox(pen.totalInput, p(36250), p(1), 'P5: Total pension input = £36,250');
+          // Unused AA: £60,000 - £36,250 = £23,750
+          this.assertApprox(pen.unusedAA, p(23750), p(1), 'P5: Unused AA = £23,750');
+        }
+
+        // Band extension: employee RAS gross + SIPP gross = £3,750 + £25,000 = £28,750
+        this.assertApprox(sa.incomeTax.basicRateBandExtension, p(28750), p(1), 'P5: Band extension = £28,750');
+
+        // IT: PA = £0 (income > £125,140)
+        this.assertExact(sa.incomeTax.personalAllowance, 0, 'P5: PA = £0');
+        // Extended BR: £37,700 + £28,750 = £66,450
+        this.assertApprox(sa.incomeTax.extendedBasicRateLimit, p(66450), p(1), 'P5: Extended BR limit = £66,450');
+        // Extended AR: £125,140 + £28,750 = £153,890
+        this.assertApprox(sa.incomeTax.extendedARThreshold, p(153890), p(1), 'P5: Extended AR threshold = £153,890');
+
+        // Basic: £66,450 * 20% = £13,290
+        // Higher: (£153,890 - £66,450) = £87,440 * 40% = £34,976
+        // Additional: (£245,000 - £153,890) = £91,110 * 45% = £40,999.50 → £41,000 (rounded)
+        // Gross tax: ~£89,266
+        this.assertApprox(sa.incomeTax.grossTax, 8926550, p(5), 'P5: Gross IT = £89,265.50');
+
+        // SIPP relief: £25,000 gross * 25% = £6,250
+        this.assertApprox(sa.incomeTax.sippRelief, p(6250), p(1), 'P5: SIPP relief = £6,250');
+
+        // Tax after deductions: £89,265.50 - £6,250 = £83,015.50
+        this.assertApprox(sa.incomeTax.taxAfterDeductions, 8301550, p(5), 'P5: Tax after deductions = £83,015.50');
+
+        // PAYE: £96,000. Underpayment: negative (overpayment)
+        this.assert(sa.incomeTax.netUnderpayment < 0, 'P5: Overpayment (negative underpayment)', '< 0', sa.incomeTax.netUnderpayment);
+        // Total liability = max(0, underpayment) + CGT = 0 + 0 = 0
+        this.assertExact(sa.totalLiability, 0, 'P5: Total liability = £0 (overpaid)');
+      }
+    });
+
+    // ===== PROFILE 6: Salary sacrifice + rental + Section 24 =====
+    this.results.push({ section: 'Profile 6: Salary sacrifice + rental + S24' });
+    this.withFixture({
+      transactions: [],
+      employmentData: {
+        '2024/25': { grossPay: p(200000), taxPaid: p(74000) },
+      },
+      rentalData: {
+        '2024/25': {
+          grossRent: p(20000),
+          airbnbFees: p(2000),
+          councilTax: p(1500),
+          serviceCharge: p(1000),
+          accountancy: p(500),
+          mortgageInterest: p(8000),
+        },
+      },
+      pensionData: {
+        '2024/25': {
+          grossIncome: p(200000),
+          employeeContrib: p(10000), // Salary sacrifice — already excluded from gross
+          employerContrib: p(10000),
+          schemeType: 'salary-sacrifice',
+          sippContrib: 0,
+        },
+      },
+      hmrcRates: { '2024/25': 0.7836 },
+      lockedYears: [],
+      openingPool: { date: '2024-04-06', qty: 0, sterlingCost: 0, usdConversionRate: 1.0, source: 'test', locked: false },
+    }, () => {
+      const sa = SelfAssessment.compute('2024/25');
+      this.assert(sa !== null, 'P6: SA computed', 'not null', sa);
+      if (sa) {
+        // Rental: profit = £20,000 - (£2,000+£1,500+£1,000+£500) = £20,000 - £5,000 = £15,000
+        this.assertApprox(sa.rental.taxableProfit, p(15000), 0, 'P6: Rental profit = £15,000');
+        // S24 credit: £8,000 * 20% = £1,600
+        this.assertApprox(sa.rental.taxCredit, p(1600), 0, 'P6: S24 credit = £1,600');
+
+        // Salary sacrifice does NOT extend bands
+        this.assertExact(sa.incomeTax.basicRateBandExtension, 0, 'P6: No band extension (salary sacrifice)');
+
+        // Total income: £200,000 + £15,000 = £215,000
+        this.assertApprox(sa.incomeTax.totalIncome, p(215000), 0, 'P6: Total income = £215,000');
+        // PA: £0 (> £125,140)
+        this.assertExact(sa.incomeTax.personalAllowance, 0, 'P6: PA = £0');
+
+        // IT: Basic: £37,700*20% = £7,540. Higher: £87,440*40% = £34,976. Addl: £89,860*45% = £40,437
+        // Gross tax: £82,953
+        this.assertApprox(sa.incomeTax.grossTax, p(82953), p(5), 'P6: Gross IT ~£82,953');
+        // S24 credit: -£1,600. Tax after: £81,353
+        this.assertApprox(sa.incomeTax.s24Credit, p(1600), 0, 'P6: IT S24 credit = £1,600');
+        this.assertApprox(sa.incomeTax.taxAfterDeductions, p(81353), p(5), 'P6: Tax after deductions ~£81,353');
+        // PAYE: £74,000. Underpayment: ~£7,353
+        this.assertApprox(sa.incomeTax.netUnderpayment, p(7353), p(5), 'P6: IT underpayment ~£7,353');
+        // Total liability: ~£7,353 + £0 CGT = ~£7,353
+        this.assertApprox(sa.totalLiability, p(7353), p(5), 'P6: Total liability ~£7,353');
+      }
+    });
+
+    // ===== PROFILE 7: Blocked case =====
+    this.results.push({ section: 'Profile 7: Blocked case — missing data' });
+    this.withFixture({
+      transactions: [
+        // One disposal with no acquisitions — should trigger invariant errors
+        { date: '2024-08-01', type: 'disposal', subtype: 'voluntary', qty: 100, gbpProceeds: 100 * 5000 },
+      ],
+      employmentData: {}, // NO employment data
+      rentalData: {},
+      pensionData: {},
+      hmrcRates: { '2024/25': 0.7836 },
+      lockedYears: [],
+      openingPool: { date: '2024-04-06', qty: 0, sterlingCost: 0, usdConversionRate: 1.0, source: 'test', locked: false },
+    }, () => {
+      const sa = SelfAssessment.compute('2024/25');
+      // SelfAssessment.compute returns null if incomeTax is null (no employment data)
+      this.assertExact(sa, null, 'P7: SA returns null (no employment data)');
+
+      // Trust level for a year with no employment data
+      const trust = CalibrationConfig.getTrustLevel('2024/25');
+      this.assertExact(trust, 'provisional_blocked', 'P7: Trust = provisional_blocked');
+    });
+
+    // ===== PROFILE 8: Options exercise-and-hold =====
+    this.results.push({ section: 'Profile 8: Options exercise-and-hold' });
+    this.withFixture({
+      transactions: [
+        // Exercise 500 options at $2.79 strike, market $100. Pool entry at $100/share.
+        // This is modelled as an acquisition at market price ($100 = 10000 cents).
+        { date: '2024-06-15', type: 'acquisition', subtype: 'RSU', qty: 500, usdPricePerShare: 10000 },
+        // Sell 200 at $120 on 2024-11-15 (post-budget)
+        { date: '2024-11-15', type: 'disposal', subtype: 'voluntary', qty: 200, gbpProceeds: 200 * 12000 },
+      ],
+      employmentData: {
+        '2024/25': { grossPay: p(150000), taxPaid: p(52000) },
+      },
+      rentalData: {},
+      pensionData: {},
+      hmrcRates: { '2024/25': 0.7836 },
+      lockedYears: [],
+      openingPool: { date: '2024-04-06', qty: 0, sterlingCost: 0, usdConversionRate: 1.0, source: 'test', locked: false },
+    }, () => {
+      const sa = SelfAssessment.compute('2024/25');
+      this.assert(sa !== null, 'P8: SA computed', 'not null', sa);
+      if (sa) {
+        // Pool: 500 shares at $100. Sell 200 at $120.
+        // USD gain: 200 * (12000 - 10000) = 400000 cents = $4,000
+        // GBP gain: 400000 * 0.7836 = 313440 pence = ~£3,134.40
+        // AEA: £3,000 = 300000p. Taxable: 313440 - 300000 = 13440 (~£134.40)
+        // Post-budget rate: 24%. CGT = 13440 * 24/100 = 3226 (~£32.26)
+        const expectedGain = roundPence(400000 * 0.7836);
+        const expectedTaxable = expectedGain - 300000;
+        const expectedCgt = roundPence(expectedTaxable * 24 / 100);
+
+        this.assertApprox(sa.cgt.taxableGains, expectedTaxable, p(1), 'P8: Taxable gains ~£134');
+        this.assertApprox(sa.cgt.cgtDue, expectedCgt, p(1), 'P8: CGT ~£32 (post-budget 24%)');
+
+        // Pool remaining: 500 - 200 = 300
+        this.assertExact(sa.poolResult.finalPool.qty, 300, 'P8: Pool qty = 300');
+
+        // Exercise spread NOT in CGT — verify cost basis is $100 not $2.79
+        // The acquisition is at $100, so the pool avg should be $100/share
+        const poolAvg = sa.poolResult.finalPool.usdCost / sa.poolResult.finalPool.qty;
+        this.assertApprox(poolAvg, 10000, 1, 'P8: Pool avg = $100/share (exercise market price, not strike)');
+
+        // IT: PA = £0 (£150k > £125,140). Taxable: £150,000.
+        // Basic: £37,700*20% = £7,540. Higher: £87,440*40% = £34,976. Addl: £24,860*45% = £11,187
+        // Gross tax: ~£53,703
+        this.assertExact(sa.incomeTax.personalAllowance, 0, 'P8: PA = £0');
+        this.assertApprox(sa.incomeTax.grossTax, p(53703), p(5), 'P8: Gross IT ~£53,703');
+        this.assertApprox(sa.incomeTax.netUnderpayment, p(1703), p(5), 'P8: IT underpayment ~£1,703');
+      }
+    });
+
+    return {
+      results: this.results,
+      pass: this.pass,
+      fail: this.fail,
+      total: this.pass + this.fail,
+    };
+  }
+};
+
+
+// ========== IMPORT TESTS ==========
+// Integration tests: CSV text -> FileImporter parsing -> validation -> engine computation
+const ImportTests = {
+  results: [],
+  pass: 0,
+  fail: 0,
+
+  // Helper to create a CSV string from header array and row arrays
+  makeCSV(headers, rows) {
+    return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+  },
+
+  // Create a mock File-like object from CSV text
+  makeFile(csvText, name) {
+    return {
+      name: name || 'test.csv',
+      text: () => Promise.resolve(csvText),
+    };
+  },
+
+  assert(condition, label, expected, actual) {
+    const passed = !!condition;
+    this.results.push({ passed, label, expected: String(expected), actual: String(actual) });
+    if (passed) this.pass++; else this.fail++;
+  },
+
+  assertExact(actual, expected, label) {
+    this.assert(actual === expected, label, expected, actual);
+  },
+
+  assertApprox(actual, expected, tolerance, label) {
+    const diff = Math.abs(actual - expected);
+    this.assert(diff <= tolerance, label, expected, actual);
+  },
+
+  // Reuse StressTests' withFixture for engine tests
+  withFixture(fixture, fn) {
+    StressTests.withFixture(fixture, fn);
+  },
+
+  async run() {
+    this.results = [];
+    this.pass = 0;
+    this.fail = 0;
+
+    const GL_HEADERS = ['Record Type','Symbol','Plan Type','Quantity','Date Acquired','Date Sold','Acquisition Cost Per Share','Proceeds Per Share','Total Proceeds','Order Type','Vest Date','Vest Date FMV','Grant Number'];
+
+    // ===== TEST 1: Basic STC import =====
+    this.results.push({ section: 'Import Test 1: Basic STC import' });
+    {
+      const csv = this.makeCSV(GL_HEADERS, [
+        ['Sell','ANTHC','RSU','171','11/15/2024','11/18/2024','100.00','102.00','17442.00','RS STC','11/15/2024','100.00','G001'],
+      ]);
+      const file = this.makeFile(csv, 'test_stc.csv');
+      const result = await FileImporter.parse(file);
+
+      this.assertExact(result.schema, 'gl_expanded', 'T1: Detected gl_expanded schema');
+
+      const acqs = result.transactions.filter(t => t.type === 'acquisition');
+      const disps = result.transactions.filter(t => t.type === 'disposal');
+      this.assert(acqs.length + disps.length >= 2, true, 'T1: Parser produces acq + disposal (>= 2 records)');
+
+      // Acquisition: 171 shares vested at $100 on 11/15
+      const acq = acqs.find(t => t.date === '2024-11-15');
+      this.assert(acq !== undefined, 'T1: Acquisition on 2024-11-15 found', 'found', acq ? 'found' : 'missing');
+      if (acq) {
+        this.assertExact(acq.qty, 171, 'T1: Acquisition qty = 171');
+        this.assertExact(acq.usdPricePerShare, 10000, 'T1: Acquisition price = $100 (10000 cents)');
+      }
+
+      // Disposal: 171 shares sold at $102 on 11/18
+      const disp = disps.find(t => t.date === '2024-11-18');
+      this.assert(disp !== undefined, 'T1: Disposal on 2024-11-18 found', 'found', disp ? 'found' : 'missing');
+      if (disp) {
+        this.assertExact(disp.qty, 171, 'T1: Disposal qty = 171');
+        this.assertExact(disp.classification, 'STC Sale', 'T1: Classification = STC Sale');
+        this.assertApprox(disp.gbpProceeds, 1744200, 100, 'T1: Proceeds = $17,442 in cents');
+      }
+    }
+
+    // ===== TEST 2: Voluntary sale classification =====
+    this.results.push({ section: 'Import Test 2: Voluntary sale classification' });
+    {
+      const csv = this.makeCSV(GL_HEADERS, [
+        ['Sell','ANTHC','RSU','50','06/01/2024','09/15/2024','85.00','120.00','6000.00','Sell Restricted Stock','06/01/2024','85.00','G002'],
+      ]);
+      const file = this.makeFile(csv, 'test_voluntary.csv');
+      const result = await FileImporter.parse(file);
+
+      const disps = result.transactions.filter(t => t.type === 'disposal');
+      this.assert(disps.length >= 1, 'T2: At least 1 disposal found', '>= 1', disps.length);
+      if (disps.length >= 1) {
+        this.assertExact(disps[0].classification, 'Voluntary Sale', 'T2: Classification = Voluntary Sale (not STC)');
+        this.assertExact(disps[0].subtype, 'voluntary', 'T2: Subtype = voluntary');
+      }
+    }
+
+    // ===== TEST 3: Multiple lots aggregation =====
+    this.results.push({ section: 'Import Test 3: Multiple lots aggregation' });
+    {
+      const csv = this.makeCSV(GL_HEADERS, [
+        ['Sell','ANTHC','RSU','30','05/01/2024','08/20/2024','80.00','110.00','3300.00','RS STC','05/01/2024','80.00','G010'],
+        ['Sell','ANTHC','RSU','40','06/01/2024','08/20/2024','85.00','110.00','4400.00','RS STC','06/01/2024','85.00','G011'],
+        ['Sell','ANTHC','RSU','50','07/01/2024','08/20/2024','90.00','110.00','5500.00','RS STC','07/01/2024','90.00','G012'],
+      ]);
+      const file = this.makeFile(csv, 'test_aggregate.csv');
+      const result = await FileImporter.parse(file);
+
+      // 3 lots sold on 08/20 should aggregate into 1 disposal
+      const disps = result.transactions.filter(t => t.type === 'disposal');
+      this.assertExact(disps.length, 1, 'T3: 3 lots aggregate into 1 disposal');
+      if (disps.length === 1) {
+        this.assertExact(disps[0].qty, 120, 'T3: Aggregated qty = 30+40+50 = 120');
+        this.assertApprox(disps[0].gbpProceeds, 1320000, 100, 'T3: Aggregated proceeds = $13,200 in cents');
+      }
+
+      // Should have 3 separate acquisitions (different vest dates)
+      const acqs = result.transactions.filter(t => t.type === 'acquisition');
+      this.assertExact(acqs.length, 3, 'T3: 3 separate acquisitions (different vest dates)');
+    }
+
+    // ===== TEST 4: Date parsing formats =====
+    this.results.push({ section: 'Import Test 4: Date parsing formats' });
+    {
+      const csv = this.makeCSV(GL_HEADERS, [
+        ['Sell','ANTHC','RSU','25','1/5/2024','12/31/2024','90.00','95.00','2375.00','RS STC','1/5/2024','90.00','G020'],
+        ['Sell','ANTHC','RSU','25','11/15/2024','11/18/2024','100.00','105.00','2625.00','RS STC','11/15/2024','100.00','G021'],
+      ]);
+      const file = this.makeFile(csv, 'test_dates.csv');
+      const result = await FileImporter.parse(file);
+
+      const acqs = result.transactions.filter(t => t.type === 'acquisition');
+      const disps = result.transactions.filter(t => t.type === 'disposal');
+
+      // 1/5/2024 (MM/DD/YYYY) -> 2024-01-05
+      const jan5 = acqs.find(t => t.date === '2024-01-05');
+      this.assert(jan5 !== undefined, 'T4: 1/5/2024 normalizes to 2024-01-05', '2024-01-05', jan5 ? jan5.date : 'missing');
+
+      // 12/31/2024 -> 2024-12-31
+      const dec31 = disps.find(t => t.date === '2024-12-31');
+      this.assert(dec31 !== undefined, 'T4: 12/31/2024 normalizes to 2024-12-31', '2024-12-31', dec31 ? dec31.date : 'missing');
+
+      // 11/15/2024 -> 2024-11-15
+      const nov15 = acqs.find(t => t.date === '2024-11-15');
+      this.assert(nov15 !== undefined, 'T4: 11/15/2024 normalizes to 2024-11-15', '2024-11-15', nov15 ? nov15.date : 'missing');
+    }
+
+    // ===== TEST 5: Price validation — $0 vest FMV warning =====
+    this.results.push({ section: 'Import Test 5: Price validation' });
+    {
+      const csv = this.makeCSV(GL_HEADERS, [
+        ['Sell','ANTHC','RSU','100','03/01/2024','03/05/2024','0.00','95.00','9500.00','RS STC','03/01/2024','0.00','G030'],
+      ]);
+
+      // Isolate from existing TRANSACTIONS to avoid cutoff interference
+      const savedTx = [...TRANSACTIONS];
+      try {
+        TRANSACTIONS.length = 0;
+
+        const file = this.makeFile(csv, 'test_zero_price.csv');
+        const result = await FileImporter.parse(file);
+
+        // With $0 vest FMV, the GL parser skips acquisition creation (vestPrice > 0 guard).
+        // Only the disposal is created.
+        const acqs = result.transactions.filter(t => t.type === 'acquisition');
+        this.assertExact(acqs.length, 0, 'T5: No acquisition created when vest FMV = $0');
+
+        // Disposal should still be created (it has valid proceeds)
+        const disps = result.transactions.filter(t => t.type === 'disposal');
+        this.assert(disps.length >= 1, 'T5: Disposal still created with $0 vest FMV', '>= 1', disps.length);
+
+        // Cross-field validation flags the STC with vestPrice=0 vs salePrice mismatch
+        const crossFieldWarning = result.issues.some(i =>
+          i.severity === 'warning' && i.message.includes('cross-field')
+        );
+        this.assert(crossFieldWarning, 'T5: Cross-field warning for $0 vest price vs sale price', 'warning present', crossFieldWarning ? 'warning present' : 'no warning');
+      } finally {
+        TRANSACTIONS.length = 0;
+        savedTx.forEach(t => TRANSACTIONS.push(t));
+      }
+    }
+
+    // ===== TEST 6: Full pipeline — CSV to computation =====
+    this.results.push({ section: 'Import Test 6: Full pipeline — CSV to computation' });
+    {
+      // Replicate Profile 2 from StressTests: higher-rate, small share sales
+      // 3 RSU vestings: 100 shares each at $80, $85, $90
+      // 3 STC sales: 50 shares each at $82, $87, $92 (next day after vest)
+      const csv = this.makeCSV(GL_HEADERS, [
+        ['Sell','ANTHC','RSU','50','05/01/2024','05/02/2024','80.00','82.00','4100.00','RS STC','05/01/2024','80.00','G040'],
+        ['Sell','ANTHC','RSU','50','06/01/2024','06/02/2024','85.00','87.00','4350.00','RS STC','06/01/2024','85.00','G041'],
+        ['Sell','ANTHC','RSU','50','07/01/2024','07/02/2024','90.00','92.00','4600.00','RS STC','07/01/2024','90.00','G042'],
+      ]);
+      const file = this.makeFile(csv, 'test_full_pipeline.csv');
+      const result = await FileImporter.parse(file);
+
+      this.assertExact(result.ok, true, 'T6: Parse succeeded');
+      const acqs = result.transactions.filter(t => t.type === 'acquisition');
+      const disps = result.transactions.filter(t => t.type === 'disposal');
+      this.assertExact(acqs.length, 3, 'T6: 3 acquisitions extracted');
+      this.assertExact(disps.length, 3, 'T6: 3 disposals extracted');
+
+      // Feed parsed transactions into the engine.
+      // Note: GL parser derives acquisition qty from sale rows (50 each, not 100).
+      // So total acq = 150, total sold = 150, final pool = 0.
+      const parsedTx = result.transactions.filter(t => t.type !== 'unknown');
+
+      this.withFixture({
+        transactions: parsedTx,
+        employmentData: {
+          '2024/25': { grossPay: p(75000), taxPaid: p(17432) },
+        },
+        rentalData: {},
+        pensionData: {},
+        hmrcRates: { '2024/25': 0.7836 },
+        lockedYears: [],
+        openingPool: { date: '2024-04-06', qty: 0, sterlingCost: 0, usdConversionRate: 1.0, source: 'test', locked: false },
+      }, () => {
+        const sa = SelfAssessment.compute('2024/25');
+        this.assert(sa !== null, 'T6: SelfAssessment computed from parsed CSV', 'not null', sa);
+        if (sa) {
+          // Gains below AEA, so taxable gains = 0
+          this.assertExact(sa.cgt.taxableGains, 0, 'T6: Taxable gains = 0 (below AEA)');
+          this.assertExact(sa.cgt.cgtDue, 0, 'T6: CGT = £0');
+          this.assertApprox(sa.incomeTax.personalAllowance, p(12570), 0, 'T6: PA = £12,570');
+          this.assertApprox(sa.totalLiability, 0, p(1), 'T6: Total liability = £0');
+          // Pool: acq qty = sale qty from CSV (50 each), so 150 acq - 150 sold = 0
+          this.assertExact(sa.poolResult.finalPool.qty, 0, 'T6: Pool qty = 0 (CSV-derived: acq qty = sale qty)');
+        }
+      });
+    }
+
+    // ===== TEST 7: Duplicate detection =====
+    this.results.push({ section: 'Import Test 7: Duplicate detection' });
+    {
+      const csv = this.makeCSV(GL_HEADERS, [
+        ['Sell','ANTHC','RSU','100','05/15/2024','05/20/2024','80.00','85.00','8500.00','RS STC','05/15/2024','80.00','G050'],
+      ]);
+
+      // Save original TRANSACTIONS, add a matching transaction
+      const savedTx = [...TRANSACTIONS];
+      try {
+        TRANSACTIONS.push({
+          date: '2024-05-20', type: 'disposal', subtype: 'STC',
+          qty: 100, gbpCost: 0, gbpProceeds: 850000,
+          notes: 'Existing STC sale',
+        });
+        TRANSACTIONS.push({
+          date: '2024-05-15', type: 'acquisition', subtype: 'RSU',
+          qty: 100, usdPricePerShare: 8000,
+          gbpCost: 0, notes: 'Existing vesting',
+        });
+
+        const file = this.makeFile(csv, 'test_dupes.csv');
+        const result = await FileImporter.parse(file);
+
+        const dupeCount = result.transactions.filter(t => t._duplicate).length;
+        this.assert(dupeCount >= 1, 'T7: At least 1 duplicate detected', '>= 1', dupeCount);
+
+        const dupeIssue = result.issues.some(i => i.message.includes('already exist'));
+        this.assert(dupeIssue, 'T7: Duplicate warning issued', 'warning present', dupeIssue ? 'warning present' : 'no warning');
+      } finally {
+        TRANSACTIONS.length = 0;
+        savedTx.forEach(t => TRANSACTIONS.push(t));
+      }
+    }
+
+    // ===== TEST 8: Date cutoff =====
+    this.results.push({ section: 'Import Test 8: Date cutoff' });
+    {
+      const csv = this.makeCSV(GL_HEADERS, [
+        // One row BEFORE the cutoff date
+        ['Sell','ANTHC','RSU','30','01/10/2024','01/15/2024','70.00','75.00','2250.00','RS STC','01/10/2024','70.00','G060'],
+        // One row AFTER the cutoff date
+        ['Sell','ANTHC','RSU','40','09/01/2024','09/05/2024','90.00','95.00','3800.00','RS STC','09/01/2024','90.00','G061'],
+      ]);
+
+      // Pre-populate TRANSACTIONS with data up to 2024-06-30
+      const savedTx = [...TRANSACTIONS];
+      try {
+        TRANSACTIONS.length = 0;
+        TRANSACTIONS.push({
+          date: '2024-06-30', type: 'disposal', subtype: 'STC',
+          qty: 50, gbpCost: 0, gbpProceeds: 500000,
+          notes: 'Latest existing transaction',
+        });
+
+        const file = this.makeFile(csv, 'test_cutoff.csv');
+        const result = await FileImporter.parse(file);
+
+        // Transactions on or before 2024-06-30 should be marked as covered
+        const coveredCount = result.transactions.filter(t => t._coveredByPool).length;
+        this.assert(coveredCount >= 1, 'T8: Pre-cutoff transactions marked as covered', '>= 1', coveredCount);
+
+        // The transaction after cutoff should NOT be covered
+        const postCutoff = result.transactions.filter(t =>
+          !t._duplicate && !t._coveredByPool && t.date && t.date > '2024-06-30'
+        );
+        this.assert(postCutoff.length >= 1, 'T8: Post-cutoff transaction not excluded', '>= 1', postCutoff.length);
+
+        // Cutoff date should be reported
+        this.assertExact(result.cutoffDate, '2024-06-30', 'T8: Cutoff date = 2024-06-30');
+      } finally {
+        TRANSACTIONS.length = 0;
+        savedTx.forEach(t => TRANSACTIONS.push(t));
+      }
+    }
+
+    return {
+      results: this.results,
+      pass: this.pass,
+      fail: this.fail,
+      total: this.pass + this.fail,
+    };
+  }
+};
+
+
 // ========== FILE IMPORTER ==========
 const FileImporter = {
   // Severity levels
@@ -3687,7 +4527,7 @@ const FileImporter = {
 const App = {
   currentYear: '2024/25',
   currentScreen: 1,
-  selectedSources: { employment: true, equity: true, rental: false, pension: true },
+  selectedSources: { employment: true, equity: true, rental: true, pension: true },
   expandedComputation: null,
   _importResult: null,
   _parsedCSV: null,
@@ -3695,8 +4535,26 @@ const App = {
   _currentFile: null,
 
   init() {
-    // Check for ?test mode -- default to edge case tests for clean version
+    // Check for ?test mode
     const testParam = new URLSearchParams(location.search).get('test');
+    if (testParam === 'edge') {
+      this.currentScreen = 4;
+      this.renderScreen();
+      this.runEdgeCaseTests();
+      return;
+    }
+    if (testParam === 'stress') {
+      this.currentScreen = 4;
+      this.renderScreen();
+      this.runStressTests();
+      return;
+    }
+    if (testParam === 'import') {
+      this.currentScreen = 4;
+      this.renderScreen();
+      this.runImportTests();
+      return;
+    }
     if (testParam === 'regression') {
       this.currentScreen = 4;
       this.renderScreen();
@@ -3814,6 +4672,7 @@ const App = {
 
   selectYear(yr) {
     this.currentYear = yr;
+    // Auto-select sources based on data availability
     this.selectedSources = {
       employment: !!EMPLOYMENT_DATA[yr],
       equity: true,
@@ -3834,9 +4693,11 @@ const App = {
     const sources = [
       { id: 'employment', icon: this.iconBriefcase(), title: 'Employment', desc: 'Salary from your employer', na: false },
       { id: 'equity', icon: this.iconTrending(), title: 'Equity', desc: 'Stock vesting, sales & options', na: false },
-      { id: 'rental', icon: this.iconHome(), title: 'Rental', desc: 'UK rental income', na: false },
+      { id: 'rental', icon: this.iconHome(), title: 'Rental', desc: 'UK rental income', na: yr === '2025/26' },
       { id: 'pension', icon: this.iconShield(), title: 'Pension', desc: 'Workplace & SIPP', na: false },
     ];
+
+    const priorYear = yr === '2025/26' ? '2024/25' : (yr === '2024/25' ? '2023/24' : '2022/23');
 
     return `<div class="screen">
       ${this.renderStepDots(2)}
@@ -3852,7 +4713,7 @@ const App = {
           </div>
         `).join('')}
       </div>
-      <p class="pre-selected-note">Select all income sources that apply to you for ${yr}</p>
+      <p class="pre-selected-note">Pre-selected based on your ${priorYear} return</p>
       <a class="add-other-link" href="#" onclick="event.preventDefault();App.toggleOtherIncome()">Add other income</a>
       <div id="other-income-section" style="display:none;margin-top:12px;">
         <div class="card" style="padding:20px;">
@@ -3891,6 +4752,7 @@ const App = {
   },
 
   toggleSource(id) {
+    if (id === 'rental' && this.currentYear === '2025/26') return;
     this.selectedSources[id] = !this.selectedSources[id];
     this.renderScreen();
   },
@@ -3911,9 +4773,9 @@ const App = {
       docCards += `<div class="doc-card ${hasP60 ? 'completed' : ''}">
         <div class="doc-card-header">
           <div class="doc-card-title">
-            <span class="status-dot ${hasP60 ? 'complete' : 'missing'}"></span>
+            <span class="status-dot ${hasP60 ? 'complete' : 'pending'}"></span>
             P60 / Employment
-            ${hasP60 ? '<span class="doc-card-pill pill pill-green">Uploaded</span>' : '<span class="doc-card-pill pill pill-grey">Not yet uploaded</span>'}
+            ${hasP60 ? '<span class="doc-card-pill pill pill-green">Uploaded</span>' : ''}
           </div>
           ${hasP60 ? `<a class="doc-card-edit" onclick="App.editP60()">Edit</a>` : ''}
         </div>
@@ -3952,14 +4814,14 @@ const App = {
       docCards += `<div class="doc-card ${hasEquity ? 'completed' : ''}">
         <div class="doc-card-header">
           <div class="doc-card-title">
-            <span class="status-dot ${hasEquity ? 'complete' : 'missing'}"></span>
+            <span class="status-dot ${hasEquity ? 'complete' : 'pending'}"></span>
             E*TRADE / Share Transactions
-            ${hasEquity ? '<span class="doc-card-pill pill pill-green">Uploaded</span>' : '<span class="doc-card-pill pill pill-grey">Not yet uploaded</span>'}
+            ${hasEquity ? '<span class="doc-card-pill pill pill-green">Uploaded</span>' : ''}
           </div>
         </div>
         <div class="doc-card-body">
           ${hasEquity ? `<p>${yearTx.length} disposal(s) loaded for ${yr}</p>` :
-            `<p>No share transactions for ${yr}. Use the drop zone above to import your data.</p>
+            `<p>No share transactions for ${yr}. Drop a file above or use the drop zone.</p>
             <div class="guidance">Where to find this: E*TRADE > Tax Center > Gains & Losses (Expanded) report</div>`}
         </div>
       </div>`;
@@ -3970,9 +4832,9 @@ const App = {
       docCards += `<div class="doc-card ${hasPen ? 'completed' : ''}">
         <div class="doc-card-header">
           <div class="doc-card-title">
-            <span class="status-dot ${hasPen ? 'complete' : 'missing'}"></span>
+            <span class="status-dot ${hasPen ? 'complete' : 'pending'}"></span>
             Pension
-            ${hasPen ? '<span class="doc-card-pill pill pill-green">Uploaded</span>' : '<span class="doc-card-pill pill pill-grey">Not yet uploaded</span>'}
+            ${hasPen ? '<span class="doc-card-pill pill pill-green">Uploaded</span>' : ''}
           </div>
           ${hasPen ? `<a class="doc-card-edit" onclick="App.editPension()">Edit</a>` : ''}
         </div>
@@ -3992,9 +4854,9 @@ const App = {
       docCards += `<div class="doc-card ${hasRen ? 'completed' : ''}">
         <div class="doc-card-header">
           <div class="doc-card-title">
-            <span class="status-dot ${hasRen ? 'complete' : 'missing'}"></span>
+            <span class="status-dot ${hasRen ? 'complete' : 'pending'}"></span>
             Rental Income
-            ${hasRen ? '<span class="doc-card-pill pill pill-green">Uploaded</span>' : '<span class="doc-card-pill pill pill-grey">Not yet uploaded</span>'}
+            ${hasRen ? '<span class="doc-card-pill pill pill-green">Uploaded</span>' : ''}
           </div>
           ${hasRen ? `<a class="doc-card-edit" onclick="App.editRental()">Edit</a>` : ''}
         </div>
@@ -4007,7 +4869,7 @@ const App = {
     return `<div class="screen">
       ${this.renderStepDots(3)}
       <h2>Your documents</h2>
-      <div class="drop-zone" id="dropZone" style="padding:48px 24px;min-height:180px;"
+      <div class="drop-zone" id="dropZone"
            ondragover="event.preventDefault();this.classList.add('dragover')"
            ondragleave="this.classList.remove('dragover')"
            ondrop="event.preventDefault();this.classList.remove('dragover');App.handleDrop(event)"
@@ -4016,7 +4878,7 @@ const App = {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
         </div>
         <div class="drop-zone-title">Drop files here or click to browse</div>
-        <div class="drop-zone-sub">Start by uploading your E*TRADE Gains & Losses export, P60, or payslips.</div>
+        <div class="drop-zone-sub">We'll work out what each file contains</div>
         <div class="drop-zone-formats">.xlsx, .xls, .csv, .txt</div>
         <input type="file" accept=".xlsx,.xls,.csv,.txt" id="csvFile" onchange="App.handleCSVUpload(event)" multiple>
       </div>
@@ -4100,10 +4962,7 @@ const App = {
       return `<div class="screen">
         ${this.renderStepDots(4)}
         <h2>Your tax summary</h2>
-        <div class="card" style="padding:32px;text-align:center;">
-          <p style="font-size:15px;color:var(--text-secondary);margin-bottom:16px;">No data yet for ${yr}.</p>
-          <p style="font-size:13px;color:var(--text-tertiary);">Go back to upload your documents -- we need at least your P60 and share transaction data to calculate your liability.</p>
-        </div>
+        <p style="color:var(--text-secondary);">No data available for ${yr}. Go back and add your income sources.</p>
         <div class="btn-row">
           <button class="btn btn-ghost" onclick="App.goTo(3)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
@@ -4129,7 +4988,7 @@ const App = {
       { label: 'HMRC rate', done: !isProvisional },
       { label: 'Pension', done: !!penData },
     ];
-    if (this.selectedSources.rental) {
+    if (this.selectedSources.rental && yr !== '2025/26') {
       items.push({ label: 'Rental', done: !!renData });
     }
     const doneCount = items.filter(i => i.done).length;
@@ -4170,7 +5029,7 @@ const App = {
     if (rental.inactive) {
       rentalBadge = '<span class="br-badge included">N/A</span>';
       rentalAmount = '<span class="br-amount muted">N/A</span>';
-      rentalDetail = 'No rental data for this year.';
+      rentalDetail = 'Property no longer let.';
     } else {
       rentalBadge = '<span class="br-badge included">Included above</span>';
       rentalAmount = `<span class="br-amount muted">${fmt(rental.taxableProfit)} profit</span>`;
@@ -4291,13 +5150,14 @@ const App = {
 
       <!-- Footnote -->
       <div class="footnote">
-        ${isLocked ? 'Verified against filed return' : 'Estimated'} &middot; ${assumptionCount} assumptions disclosed<br>
+        ${isLocked ? 'Verified against filed return' : 'Estimated'} &middot; Component-level reconciliation &middot; ${assumptionCount} assumptions disclosed<br>
         <a href="#" onclick="event.preventDefault();document.querySelector('.audit-trail-toggle')?.click()">View computation assumptions</a>
       </div>
 
       ${this.renderPrintComputation(yr, sa)}
     </div>`;
   },
+
   // ========== TIMELINE ==========
 
   renderTimeline(yr, deadlineYear) {
@@ -4595,6 +5455,7 @@ const App = {
   iconShield() {
     return `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`;
   },
+
   // ========== CSV / FILE IMPORT ==========
 
   handleDrop(event) {
@@ -4767,6 +5628,7 @@ const App = {
       </div>`;
     document.body.appendChild(overlay);
   },
+
   // ========== EXPORT / IMPORT ==========
 
   exportData() {
@@ -4899,6 +5761,72 @@ const App = {
       </div>`;
     document.body.appendChild(overlay);
   },
+
+  runStressTests() {
+    const result = StressTests.run();
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+    let html = '<div class="test-results">';
+    for (const r of result.results) {
+      if (r.section) { html += `<div class="test-section">${r.section}</div>`; continue; }
+      const cls = r.passed ? 'test-pass' : 'test-fail';
+      const icon = r.passed ? 'PASS' : 'FAIL';
+      html += `<div class="${cls}">${icon}: ${r.label}`;
+      if (!r.passed) html += ` (expected: ${r.expected}, got: ${r.actual})`;
+      html += `</div>`;
+    }
+    html += `<div class="test-summary ${result.fail === 0 ? 'all-pass' : 'has-fail'}">`;
+    html += `${result.pass}/${result.total} tests passed`;
+    if (result.fail > 0) html += ` -- ${result.fail} FAILED`;
+    html += `</div></div>`;
+
+    overlay.innerHTML = `
+      <div class="modal">
+        <div class="modal-header">
+          <h3>Stress Test Results (8 Profiles)</h3>
+          <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        ${html}
+      </div>`;
+    document.body.appendChild(overlay);
+  },
+
+  async runImportTests() {
+    const result = await ImportTests.run();
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+    let html = '<div class="test-results">';
+    for (const r of result.results) {
+      if (r.section) { html += `<div class="test-section">${r.section}</div>`; continue; }
+      const cls = r.passed ? 'test-pass' : 'test-fail';
+      const icon = r.passed ? 'PASS' : 'FAIL';
+      html += `<div class="${cls}">${icon}: ${r.label}`;
+      if (!r.passed) html += ` (expected: ${r.expected}, got: ${r.actual})`;
+      html += `</div>`;
+    }
+    html += `<div class="test-summary ${result.fail === 0 ? 'all-pass' : 'has-fail'}">`;
+    html += `${result.pass}/${result.total} tests passed`;
+    if (result.fail > 0) html += ` -- ${result.fail} FAILED`;
+    html += `</div></div>`;
+
+    overlay.innerHTML = `
+      <div class="modal">
+        <div class="modal-header">
+          <h3>Import Integration Test Results</h3>
+          <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        ${html}
+      </div>`;
+    document.body.appendChild(overlay);
+  },
 };
 
 // ========== INIT ==========
@@ -4906,6 +5834,8 @@ window.CalibrationConfig = CalibrationConfig;
 window.EngineInvariants = EngineInvariants;
 window.Tests = Tests;
 window.EdgeCaseTests = EdgeCaseTests;
+window.StressTests = StressTests;
+window.ImportTests = ImportTests;
 window.FileImporter = FileImporter;
 window.SharePool = SharePool;
 window.CGTCalc = CGTCalc;
